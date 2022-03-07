@@ -347,14 +347,8 @@ package ariane_pkg;
         logic                   valid;
         logic [riscv::VLEN-1:0] pc;          // update at PC
         logic                   taken;
+        logic                   mispredict;
     } bht_update_t;
-
-    typedef struct packed {
-        logic                       valid;
-        logic [riscv::VLEN-1:0]     pc;             // update at PC
-        logic                       is_mispredict;
-        logic [Cfg.GHRLength-1:0]   history,
-    } pbp_update_t;
 
     typedef struct packed {
         logic       valid;

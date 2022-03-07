@@ -7,15 +7,12 @@
 // this License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
 // CONDITIONS OF ANY KIND, either express or implied. See the License for the
 // specific language governing permissions and limitations under the License.
-//
-// Author: Florian Zaruba, ETH Zurich
-// Date: 08.02.2018
-// Migrated: Luis Vitorio Cargnini, IEEE
-// Date: 09.06.2018
 
-// branch history table - 2 bit saturation counter
+
+// perceptron branch predictor - indexable table mapping pc to weight vector
 module bht #(
-    parameter int unsigned NR_ENTRIES = 1024
+    parameter int unsigned NR_ENTRIES = 1024 
+    parameter int unsigned GHR_LENGTH = 10
 )(
     input  logic                        clk_i,
     input  logic                        rst_ni,
@@ -26,80 +23,90 @@ module bht #(
     // we potentially need INSTR_PER_FETCH predictions/cycle
     output ariane_pkg::bht_prediction_t [ariane_pkg::INSTR_PER_FETCH-1:0] bht_prediction_o
 );
-    // the last bit is always zero, we don't need it for indexing
-    localparam OFFSET = 1;
-    // re-shape the branch history table
-    localparam NR_ROWS = NR_ENTRIES / ariane_pkg::INSTR_PER_FETCH;
-    // number of bits needed to index the row
-    localparam ROW_ADDR_BITS = $clog2(ariane_pkg::INSTR_PER_FETCH);
-    // number of bits we should use for prediction
-    localparam PREDICTION_BITS = $clog2(NR_ROWS) + OFFSET + ROW_ADDR_BITS;
-    // we are not interested in all bits of the address
-    unread i_unread (.d_i(|vpc_i));
+    // indexable perceptron table
+    logic [GHR_LENGTH-1:0]  perceptron_table  [NR_ENTRIES-1:0];
 
-    struct packed {
-        logic       valid;
-        logic [1:0] saturation_counter;
-    } bht_d[NR_ROWS-1:0][ariane_pkg::INSTR_PER_FETCH-1:0], bht_q[NR_ROWS-1:0][ariane_pkg::INSTR_PER_FETCH-1:0];
+    logic c_shift_en, c_shift_i;
+    logic [GHR_LENGTH-1:0] c_data;
 
-    logic [$clog2(NR_ROWS)-1:0]  index, update_pc;
-    logic [ROW_ADDR_BITS-1:0]    update_row_index;
-    logic [1:0]                  saturation_counter;
+    logic s_shift_en, s_shift_i; 
+    logic [GHR_LENGTH-1:0] s_data;
 
-    assign index     = vpc_i[PREDICTION_BITS - 1:ROW_ADDR_BITS + OFFSET];
-    assign update_pc = bht_update_i.pc[PREDICTION_BITS - 1:ROW_ADDR_BITS + OFFSET];
-    assign update_row_index = bht_update_i.pc[ROW_ADDR_BITS + OFFSET - 1:OFFSET];
+    logic y_frontend, y_instrdec, y_issue, y_exec;
+    int outcome;
 
+    // committed global history register
+    shift_reg #(
+      .bus_width      ( GHR_LENGTH     )  
+    ) c_ghr (
+      .clk_i,
+      .rst_ni,
+      .write_en       ( 1'b0           ), 
+      .shift_en       ( ~bht_update_i.mispredict & bht_update_i.valid ), 
+      .shift_i        ( ~bht_update_i.mispredict & y_exec             ),  // = branched or not branched 
+      .data_i         ( 'b0            ),
+      .data_o         ( c_data         )       
+    );
+    
+    // speculative global history register
+    shift_reg #(
+      .bus_width      ( GHR_LENGTH )  
+    ) s_ghr (
+      .clk_i,
+      .rst_ni,
+      .write_en       ( bht_update_i.mispredict ), 
+      .shift_en       ( 1'b1       ), 
+      .shift_i        ( y_frontend ),             // = branched or not branched 
+      .data_i         ( c_data     ),
+      .data_o         ( s_data     )       
+    );
+    
+    // hash for index and get perceptron
+    assign d_index = vpc_i % NR_ENTRIES;
+    assign d_perceptron = perceptron_table[d_index];
+   
     // prediction assignment
-    for (genvar i = 0; i < ariane_pkg::INSTR_PER_FETCH; i++) begin : gen_bht_output
-        assign bht_prediction_o[i].valid = bht_q[index][i].valid;
-        assign bht_prediction_o[i].taken = bht_q[index][i].saturation_counter[1] == 1'b1;
+    assign bht_prediction_o.taken = y_frontend;
+    
+    // initial
+    initial begin
+      y_frontend = 0;
     end
 
-    always_comb begin : update_bht
-        bht_d = bht_q;
-        saturation_counter = bht_q[update_pc][update_row_index].saturation_counter;
-
-        if (bht_update_i.valid && !debug_mode_i) begin
-            bht_d[update_pc][update_row_index].valid = 1'b1;
-
-            if (saturation_counter == 2'b11) begin
-                // we can safely decrease it
-                if (!bht_update_i.taken)
-                    bht_d[update_pc][update_row_index].saturation_counter = saturation_counter - 1;
-            // then check if it saturated in the negative regime e.g.: branch not taken
-            end else if (saturation_counter == 2'b00) begin
-                // we can safely increase it
-                if (bht_update_i.taken)
-                    bht_d[update_pc][update_row_index].saturation_counter = saturation_counter + 1;
-            end else begin // otherwise we are not in any boundaries and can decrease or increase it
-                if (bht_update_i.taken)
-                    bht_d[update_pc][update_row_index].saturation_counter = saturation_counter + 1;
-                else
-                    bht_d[update_pc][update_row_index].saturation_counter = saturation_counter - 1;
-            end
+    // make prediction
+    always_ff @(posedge clk) begin
+      // pipeline through rest of the stages
+      y_exec = y_issue;
+      y_issue = y_instrdec;
+      y_instrdec = y_frontend;
+      // bias
+      outcome = d_perceptron[0]
+      // dependent terms
+      for (int i = 1; i < GHR_LENGTH; i++) begin : gen_bht_output
+        if (s_data[i])
+          outcome += d_perceptron[i];
+        else 
+          outcome -= d_perceptron[i];
+      end
+      y_frontend = (outcome > 0);
+    end
+    
+    // update perceptron
+    always_ff @(posedge clk) begin : update_perceptron
+      // gate with (is valid branch?)
+      if (bht_update_i.valid && !debug_mode_i) begin
+        // if t == xi (6.Training)
+        upd_mask = bht_update_i.mispredict ? c_data : ~c_data;
+        // rehash for index
+        e_index = bht_update_i.pc % NR_ENTRIES;
+        // update weights (6.Training)
+        for (int i = 0; i < GHR_LENGTH; i++) begin
+          if (upd_mask[i])
+            perceptron_table[e_index][i] += 1;
+          else 
+            perceptron_table[e_index][i] -= 1;
         end
+      end
     end
 
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-        if (!rst_ni) begin
-            for (int unsigned i = 0; i < NR_ROWS; i++) begin
-                for (int j = 0; j < ariane_pkg::INSTR_PER_FETCH; j++) begin
-                    bht_q[i][j] <= '0;
-                end
-            end
-        end else begin
-            // evict all entries
-            if (flush_i) begin
-                for (int i = 0; i < NR_ROWS; i++) begin
-                    for (int j = 0; j < ariane_pkg::INSTR_PER_FETCH; j++) begin
-                        bht_q[i][j].valid <=  1'b0;
-                        bht_q[i][j].saturation_counter <= 2'b10;
-                    end
-                end
-            end else begin
-                bht_q <= bht_d;
-            end
-        end
-    end
 endmodule
