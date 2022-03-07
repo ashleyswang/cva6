@@ -11,7 +11,7 @@
 
 // perceptron branch predictor - indexable table mapping pc to weight vector
 module bht #(
-    parameter int unsigned NR_ENTRIES = 1024 
+    parameter int unsigned NR_ENTRIES = 1024,
     parameter int unsigned GHR_LENGTH = 10
 )(
     input  logic                        clk_i,
