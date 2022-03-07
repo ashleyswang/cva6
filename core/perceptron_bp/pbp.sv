@@ -43,7 +43,14 @@ module pbp #(
     logic s_shift_en;
     logic s_shift_i; 
     logic [GHR_LENGTH-1:0] s_data;
+
+    logic y_frontend;
+    logic y_instrdec;
+    logic y_issue;
+    logic y_exec;
     
+    int outcome;
+
     // committed global history register
     shift_reg #(
       .length           ( GHR_LENGTH )  
@@ -51,8 +58,8 @@ module pbp #(
       .clk              ( clk_i      ),
       .reset            ( rst_ni     ),
       .we               ( 1'b0       ), 
-      .se               ( c_shift_en ), 
-      .shift_in         ( c_shift_i  ),
+      .se               ( ~is_mispredict ), 
+      .shift_in         ( ~is_mispredict & y_exec), // = branched or not branched 
       .data_in          ( 'b0        ),
       .out              ( c_data     )       
     );
@@ -64,39 +71,63 @@ module pbp #(
       .clk              ( clk_i      ),
       .reset            ( rst_ni     ),
       .we               ( pbp_update_i.is_mispredict ), 
-      .se               ( s_shift_en ),  
-      .shift_in         ( s_shift_i  ), 
-      .data_in          ( c_data     ), 
+      .se               ( 1'b1 ),  
+      .shift_in         ( y  ), 
+      .data_in          ( c_data     ),
       .out              ( s_data     )     
     );
     
     // get perceptron for pc
+    // Hash
     assign d_index = vpc_i % NR_ENTRIES;
+    // Get perceptron
     assign d_perceptron = perceptron_table[d_index];
    
-    // prediction assignment 
-    assign bht_prediction_o.taken = outcome;
+    // prediction assignment
+    assign bht_prediction_o.taken = y_frontend;
+    
+    // initial
+    initial begin
+      y_frontend = 0;
+    end
+
+    // make prediction
     always_ff @(posedge clk) begin
-      outcome = 0;
-      for (int i = 0; i < GHR_LENGTH; i++) begin : gen_pbp_output
+      
+      y_exec = y_issue;
+      y_issue = y_instrdec;
+      y_instrdec = y_frontend;
+      // ###### GATE WITH VALID
+      // bias
+      outcome = d_perceptron[0]
+      // dependent terms
+      for (int i = 1; i < GHR_LENGTH; i++) begin : gen_pbp_output
         if (s_data[i])
           outcome += d_perceptron[i];
         else 
           outcome -= d_perceptron[i];
       end
+      if (outcome > 0)
+        y_frontend = 1;
+      else
+        y_frontend = 0;
     end
     
     // update perceptron
     always_ff @(posedge clk) begin : update_perceptron
+      // gate with (is valid branch?)
       if (pbp_update_i.valid && !debug_mode_i) begin
-        upd_mask = pbp_update_i.is_mispredict ? ~pbp_update_i.history 
-                                              : pbp_update_i.history;
-        e_index = pbp_update_i.pc % NR_ENTRIES;        
+        // if t == xi (6.Training)
+        upd_mask = pbp_update_i.is_mispredict ? pbp_update_i.history 
+                                              : ~pbp_update_i.history;
+        // rehash for index
+        e_index = pbp_update_i.pc % NR_ENTRIES;
+        // update weights (6.Training)
         for (int i = 0; i < GHR_LENGTH; i++) begin
           if (upd_mask[i])
-            perceptron_table[e_index] += 1;
+            perceptron_table[e_index][i] += 1;
           else 
-            perceptron_table[e_index] -= 1;
+            perceptron_table[e_index][i] -= 1;
         end
       end
     end
