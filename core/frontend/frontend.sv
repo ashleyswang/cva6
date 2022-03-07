@@ -249,7 +249,7 @@ module frontend import ariane_pkg::*; #(
     assign icache_dreq_o.kill_s2 = icache_dreq_o.kill_s1 | bp_valid;
 
     // Update Control Flow Predictions
-    bht_update_t bht_update;
+    pbp_update_t pbp_update;
     btb_update_t btb_update;
 
     // assert on branch, deassert when resolved
@@ -257,10 +257,10 @@ module frontend import ariane_pkg::*; #(
     assign speculative_d = (speculative_q && !resolved_branch_i.valid || |is_branch || |is_return || |is_jalr) && !flush_i;
     assign icache_dreq_o.spec = speculative_d;
 
-    assign bht_update.valid = resolved_branch_i.valid
+    assign pbp_update.valid = resolved_branch_i.valid
                                 & (resolved_branch_i.cf_type == ariane_pkg::Branch);
-    assign bht_update.pc    = resolved_branch_i.pc;
-    assign bht_update.taken = resolved_branch_i.is_taken;
+    assign pbp_update.pc    = resolved_branch_i.pc;
+    assign pbp_update.is_mispredict = resolved_branch_i.valid & resolved_branch_i.is_mispredict;
     // only update mispredicted branches e.g. no returns from the RAS
     assign btb_update.valid = resolved_branch_i.valid
                                 & resolved_branch_i.is_mispredict
@@ -385,15 +385,15 @@ module frontend import ariane_pkg::*; #(
       .btb_prediction_o ( btb_prediction   )
     );
 
-    bht #(
-      .NR_ENTRIES       ( ArianeCfg.BHTEntries   )
+    pbp #(
+      .NR_ENTRIES       ( ArianeCfg.BHTEntries )
     ) i_bht (
       .clk_i,
       .rst_ni,
       .flush_i          ( flush_bp_i       ),
       .debug_mode_i,
       .vpc_i            ( icache_vaddr_q   ),
-      .bht_update_i     ( bht_update       ),
+      .pbp_update_i     ( pbp_update       ),
       .bht_prediction_o ( bht_prediction   )
     );
 

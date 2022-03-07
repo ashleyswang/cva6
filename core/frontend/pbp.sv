@@ -7,80 +7,62 @@
 // this License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
 // CONDITIONS OF ANY KIND, either express or implied. See the License for the
 // specific language governing permissions and limitations under the License.
-//
-// Author: Florian Zaruba, ETH Zurich
-// Date: 08.02.2018
-// Migrated: Luis Vitorio Cargnini, IEEE
-// Date: 09.06.2018
+
 
 // perceptron branch predictor - indexable table mapping pc to weight vector
 module pbp #(
-    parameter int unsigned GHR_LENGTH = 10,
     parameter int unsigned NR_ENTRIES = 1024 
+    parameter int unsigned GHR_LENGTH = 10
 )(
-    input  logic                        clk_i,              // clock input
-    input  logic                        rst_ni,             // reset input
-    input  logic                        flush_i,            // flush input
+    input  logic                        clk_i,
+    input  logic                        rst_ni,
+    input  logic                        flush_i,
     input  logic                        debug_mode_i,
-    input  logic [riscv::VLEN-1:0]      vpc_i,              // program counter bits - decode
-
-    // input  ariane_pkg::pbp_update_t     pbp_update_i,       // previous bht result with (valid - correctness?, update at PC, taken/not taken)
-    input  logic                        valid,            // is this a valid branch - execute
-    input  logic [riscv::VLEN-1:0]      pc,                 // update at pc (pc for feedback) - execute
-    input  logic                        is_mispredict,      // is mispredict - execute
-    input  logic [GHR_LENGTH-1:0]       history,
-
-    // DON'T FORGET TO CHANGE BACK TO ARRAY 
-    output ariane_pkg::bht_prediction_t bht_prediction_o
+    input  logic [riscv::VLEN-1:0]      vpc_i,
+    input  ariane_pkg::pbp_update_t     pbp_update_i,
+    // we potentially need INSTR_PER_FETCH predictions/cycle
+    output ariane_pkg::bht_prediction_t [ariane_pkg::INSTR_PER_FETCH-1:0] bht_prediction_o
 );
     // indexable perceptron table
     logic [GHR_LENGTH-1:0]  perceptron_table  [NR_ENTRIES-1:0];
 
-    logic c_shift_en;
-    logic c_shift_i;
+    logic c_shift_en, c_shift_i;
     logic [GHR_LENGTH-1:0] c_data;
 
-    logic s_shift_en;
-    logic s_shift_i; 
+    logic s_shift_en, s_shift_i; 
     logic [GHR_LENGTH-1:0] s_data;
 
-    logic y_frontend;
-    logic y_instrdec;
-    logic y_issue;
-    logic y_exec;
-    
+    logic y_frontend, y_instrdec, y_issue, y_exec;
     int outcome;
 
     // committed global history register
     shift_reg #(
-      .length           ( GHR_LENGTH )  
+      .bus_width      ( GHR_LENGTH     )  
     ) c_ghr (
-      .clk              ( clk_i      ),
-      .reset            ( rst_ni     ),
-      .we               ( 1'b0       ), 
-      .se               ( ~is_mispredict ), 
-      .shift_in         ( ~is_mispredict & y_exec), // = branched or not branched 
-      .data_in          ( 'b0        ),
-      .out              ( c_data     )       
+      .clk_i,
+      .rst_ni,
+      .write_en       ( 1'b0           ), 
+      .shift_en       ( ~pbh_update_i.is_mispredict & pbp_update_i.valid ), 
+      .shift_i        ( ~pbh_update_i.is_mispredict & y_exec             ),  // = branched or not branched 
+      .data_i         ( 'b0            ),
+      .data_o         ( c_data         )       
     );
     
     // speculative global history register
     shift_reg #(
-      .length           ( GHR_LENGTH )
+      .bus_width      ( GHR_LENGTH )  
     ) s_ghr (
-      .clk              ( clk_i      ),
-      .reset            ( rst_ni     ),
-      .we               ( pbp_update_i.is_mispredict ), 
-      .se               ( 1'b1 ),  
-      .shift_in         ( y  ), 
-      .data_in          ( c_data     ),
-      .out              ( s_data     )     
+      .clk_i,
+      .rst_ni,
+      .write_en       ( pbp_update_i.is_mispredict ), 
+      .shift_en       ( 1'b1       ), 
+      .shift_i        ( y_frontend ),             // = branched or not branched 
+      .data_i         ( c_data     ),
+      .data_o         ( s_data     )       
     );
     
-    // get perceptron for pc
-    // Hash
+    // hash for index and get perceptron
     assign d_index = vpc_i % NR_ENTRIES;
-    // Get perceptron
     assign d_perceptron = perceptron_table[d_index];
    
     // prediction assignment
@@ -93,11 +75,10 @@ module pbp #(
 
     // make prediction
     always_ff @(posedge clk) begin
-      
+      // pipeline through rest of the stages
       y_exec = y_issue;
       y_issue = y_instrdec;
       y_instrdec = y_frontend;
-      // ###### GATE WITH VALID
       // bias
       outcome = d_perceptron[0]
       // dependent terms
@@ -107,10 +88,7 @@ module pbp #(
         else 
           outcome -= d_perceptron[i];
       end
-      if (outcome > 0)
-        y_frontend = 1;
-      else
-        y_frontend = 0;
+      y_frontend = (outcome > 0);
     end
     
     // update perceptron
@@ -118,8 +96,7 @@ module pbp #(
       // gate with (is valid branch?)
       if (pbp_update_i.valid && !debug_mode_i) begin
         // if t == xi (6.Training)
-        upd_mask = pbp_update_i.is_mispredict ? pbp_update_i.history 
-                                              : ~pbp_update_i.history;
+        upd_mask = pbp_update_i.is_mispredict ? c_data : ~c_data;
         // rehash for index
         e_index = pbp_update_i.pc % NR_ENTRIES;
         // update weights (6.Training)

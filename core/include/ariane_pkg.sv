@@ -37,6 +37,7 @@ package ariane_pkg;
       int                               RASDepth;
       int                               BTBEntries;
       int                               BHTEntries;
+      int                               GHRLength;
       // PMAs
       int unsigned                      NrNonIdempotentRules;  // Number of non idempotent rules
       logic [NrMaxRules-1:0][63:0]      NonIdempotentAddrBase; // base which needs to match
@@ -59,6 +60,7 @@ package ariane_pkg;
       RASDepth: 2,
       BTBEntries: 32,
       BHTEntries: 128,
+      GHRLength: 10,
       // idempotent region
       NrNonIdempotentRules: 2,
       NonIdempotentAddrBase: {64'b0, 64'b0},
@@ -346,6 +348,13 @@ package ariane_pkg;
         logic [riscv::VLEN-1:0] pc;          // update at PC
         logic                   taken;
     } bht_update_t;
+
+    typedef struct packed {
+        logic                       valid;
+        logic [riscv::VLEN-1:0]     pc;             // update at PC
+        logic                       is_mispredict;
+        logic [Cfg.GHRLength-1:0]   history,
+    } pbp_update_t;
 
     typedef struct packed {
         logic       valid;
