@@ -387,8 +387,8 @@ module frontend import ariane_pkg::*; #(
     );
 
     bht #(
-      .NR_ENTRIES       ( ArianeCfg.BHTEntries   ),
-      .GHR_LENGTH       ( ArianeCfg.GHRLength    )
+      .GHR_LENGTH       ( ArianeCfg.GHRLength    ),
+      .NR_ENTRIES       ( ArianeCfg.BHTEntries   )
     ) i_bht (
       .clk_i,
       .rst_ni,
