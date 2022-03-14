@@ -1,113 +1,104 @@
-// Copyright 2018 - 2019 ETH Zurich and University of Bologna.
-// Copyright and related rights are licensed under the Solderpad Hardware
-// License, Version 2.0 (the "License"); you may not use this file except in
-// compliance with the License.  You may obtain a copy of the License at
-// http://solderpad.org/licenses/SHL-2.0. Unless required by applicable law
-// or agreed to in writing, software, hardware and materials distributed under
-// this License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-// CONDITIONS OF ANY KIND, either express or implied. See the License for the
-// specific language governing permissions and limitations under the License.
-
-
 // perceptron branch predictor - indexable table mapping pc to weight vector
 module bht #(
     parameter int unsigned GHR_LENGTH = 10,
-    parameter int unsigned NR_ENTRIES = 1024
-    
+    parameter int unsigned NR_ENTRIES = 1024,
+    parameter int signed THRESHOLD = 3
 )(
     input  logic                        clk_i,
     input  logic                        rst_ni,
     input  logic                        flush_i,
     input  logic                        debug_mode_i,
+    input  logic [ariane_pkg::INSTR_PER_FETCH-1:0]  is_branch_i,
     input  logic [riscv::VLEN-1:0]      vpc_i,
     input  ariane_pkg::bht_update_t     bht_update_i,
     // we potentially need INSTR_PER_FETCH predictions/cycle
     output ariane_pkg::bht_prediction_t [ariane_pkg::INSTR_PER_FETCH-1:0] bht_prediction_o
 );
-    // indexable perceptron table
-    logic [GHR_LENGTH-1:0]  perceptron_table  [NR_ENTRIES-1:0];
 
-    logic c_shift_en, c_shift_i;
-    logic [GHR_LENGTH-1:0] c_data;
+    logic [$clog2(NR_ENTRIES)-1:0]  index_p, index_u;
+    logic [$clog2(ariane_pkg::INSTR_PER_FETCH-1)-1:0] rindex_u;
 
-    logic s_shift_en, s_shift_i; 
-    logic [GHR_LENGTH-1:0] s_data;
-
-    logic y_frontend, y_instrdec, y_issue, y_exec;
-    int outcome;
-
-    // committed global history register
-    shift_reg #(
-      .bus_width      ( GHR_LENGTH     )  
-    ) c_ghr (
-      .clk_i,
-      .rst_ni,
-      .write_en       ( 1'b0           ), 
-      .shift_en       ( ~bht_update_i.mispredict & bht_update_i.valid ), 
-      .shift_i        ( ~bht_update_i.mispredict & y_exec             ),  // = branched or not branched 
-      .data_i         ( 'b0            ),
-      .data_o         ( c_data         )       
-    );
+    logic signed [31:0] outcome [ariane_pkg::INSTR_PER_FETCH-1:0];
+    logic [GHR_LENGTH-1:0] ghr_d_spec, ghr_q_spec, ghr_d_comm, ghr_q_comm, upd_mask;
+    logic signed [GHR_LENGTH-1:0][31:0] perceptron_block;
+    logic signed [31:0] perceptron_bias;
     
-    // speculative global history register
-    shift_reg #(
-      .bus_width      ( GHR_LENGTH )  
-    ) s_ghr (
-      .clk_i,
-      .rst_ni,
-      .write_en       ( bht_update_i.mispredict ), 
-      .shift_en       ( 1'b1       ), 
-      .shift_i        ( y_frontend ),             // = branched or not branched 
-      .data_i         ( c_data     ),
-      .data_o         ( s_data     )       
-    );
-    
-    // hash for index and get perceptron
-    assign d_index = vpc_i % NR_ENTRIES;
-    assign d_perceptron = perceptron_table[d_index];
-   
-    // prediction assignment
-    assign bht_prediction_o.taken = y_frontend;
-    
-    // initial
-    initial begin
-      y_frontend = 0;
+    struct packed {
+        logic                                   valid;
+        logic signed [GHR_LENGTH-1:0][31:0]     perceptron_weights;
+        logic signed [31:0]                     bias;
+    } pbp_d[NR_ENTRIES-1:0][ariane_pkg::INSTR_PER_FETCH-1:0], pbp_q[NR_ENTRIES-1:0][ariane_pkg::INSTR_PER_FETCH-1:0];
+
+    assign index_p = (vpc_i >> 2) % NR_ENTRIES;
+    assign index_u = (bht_update_i.pc >> 2) % NR_ENTRIES;
+    assign rindex_u = bht_update_i.pc [1];
+    assign upd_mask = bht_update_i.taken ? ghr_q_comm : ~ghr_q_comm;
+
+    for (genvar i = 0; i < ariane_pkg::INSTR_PER_FETCH; i++) begin : gen_output
+        assign bht_prediction_o[i].valid = 1'b1;
+        assign bht_prediction_o[i].taken = (outcome[i] > 0);
     end
 
-    // make prediction
-    always_ff @(posedge clk) begin
-      // pipeline through rest of the stages
-      y_exec = y_issue;
-      y_issue = y_instrdec;
-      y_instrdec = y_frontend;
-      // bias
-      outcome = d_perceptron[0]
-      // dependent terms
-      for (int i = 1; i < GHR_LENGTH; i++) begin : gen_bht_output
-        if (s_data[i])
-          outcome += d_perceptron[i];
-        else 
-          outcome -= d_perceptron[i];
-      end
-      y_frontend = (outcome > 0);
-    end
-    
-    // update perceptron
-    always_ff @(posedge clk) begin : update_perceptron
-      // gate with (is valid branch?)
-      if (bht_update_i.valid && !debug_mode_i) begin
-        // if t == xi (6.Training)
-        upd_mask = bht_update_i.mispredict ? c_data : ~c_data;
-        // rehash for index
-        e_index = bht_update_i.pc % NR_ENTRIES;
-        // update weights (6.Training)
-        for (int i = 0; i < GHR_LENGTH; i++) begin
-          if (upd_mask[i])
-            perceptron_table[e_index][i] += 1;
-          else 
-            perceptron_table[e_index][i] -= 1;
+    always_comb begin
+        pbp_d = pbp_q;
+        ghr_d_spec = ghr_q_spec;
+        ghr_d_comm = ghr_q_comm;
+        perceptron_block = pbp_q[index_u][rindex_u].perceptron_weights;
+        perceptron_bias = pbp_q[index_u][rindex_u].bias;
+
+        if (bht_update_i.valid && !debug_mode_i) begin
+            // shift in resolved branch result into committed global history buffer
+            for (int unsigned i = 1; i < GHR_LENGTH; i++) begin
+                ghr_d_comm[i] = ghr_q_comm[i-1];
+            end
+            ghr_d_comm[0] = bht_update_i.taken;
+
+            // update weights and bias in perceptron
+            for (int unsigned i = 0; i < GHR_LENGTH; i++) begin
+                if (upd_mask[i])
+                    pbp_d[index_u][rindex_u].perceptron_weights[i] = (perceptron_block[i] >= THRESHOLD) ? THRESHOLD : perceptron_block[i] + 1;
+                else
+                    pbp_d[index_u][rindex_u].perceptron_weights[i] = (perceptron_block[i] <= -THRESHOLD) ? -THRESHOLD : perceptron_block[i] - 1;
+            end
+            if (bht_update_i.taken)
+                pbp_d[index_u][rindex_u].bias = (perceptron_bias >= THRESHOLD) ? THRESHOLD : perceptron_bias + 1;
+            else
+                pbp_d[index_u][rindex_u].bias = (perceptron_bias <= THRESHOLD) ? THRESHOLD : perceptron_bias - 1;
+            
+            if (bht_update_i.mispredict)
+                ghr_d_spec = ghr_d_comm;
         end
-      end
+
+        for (int unsigned i = 0; i < ariane_pkg::INSTR_PER_FETCH; i++) begin
+            outcome[i] = pbp_q[index_p][i].bias;
+            for (int unsigned j = 0; j < GHR_LENGTH; j++) begin
+                if (ghr_q_spec[j])
+                    outcome[i] += pbp_q[index_p][i].perceptron_weights[j];
+                else
+                    outcome[i] -= pbp_q[index_p][i].perceptron_weights[j];
+            end
+            if (is_branch_i[i]) begin
+                for (int unsigned j = 1; j < GHR_LENGTH; j++) begin
+                    ghr_d_spec[j] = ghr_q_spec[j-1];
+                end
+                ghr_d_spec[0] = (outcome[i] > 0);
+            end
+        end
     end
 
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni || flush_i) begin
+            for (int unsigned i = 0; i < NR_ENTRIES; i++) begin
+                for (int unsigned j = 0; j < ariane_pkg::INSTR_PER_FETCH; j++) begin
+                    pbp_q[i][j] = '0;
+                end
+            end
+            ghr_q_comm <= '0;
+            ghr_q_spec <= '0;
+        end else begin
+            pbp_q <= pbp_d;
+            ghr_q_comm <= ghr_d_comm;
+            ghr_q_spec <= ghr_d_spec;
+        end
+    end
 endmodule

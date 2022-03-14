@@ -387,13 +387,16 @@ module frontend import ariane_pkg::*; #(
     );
 
     bht #(
-      .GHR_LENGTH       ( ArianeCfg.GHRLength    ),
-      .NR_ENTRIES       ( ArianeCfg.BHTEntries   )
+      // .GHR_LENGTH       ( ArianeCfg.GHRLength    ),
+      .GHR_LENGTH       ( 4    ),
+      // .NR_ENTRIES       ( ArianeCfg.BHTEntries   )
+      .NR_ENTRIES       ( 2048   )
     ) i_bht (
       .clk_i,
       .rst_ni,
       .flush_i          ( flush_bp_i       ),
       .debug_mode_i,
+      .is_branch_i      ( is_branch        ),
       .vpc_i            ( icache_vaddr_q   ),
       .bht_update_i     ( bht_update       ),
       .bht_prediction_o ( bht_prediction   )
