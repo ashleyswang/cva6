@@ -37,6 +37,7 @@ package ariane_pkg;
       int                               RASDepth;
       int                               BTBEntries;
       int                               BHTEntries;
+      int                               GHRLength;
       // PMAs
       int unsigned                      NrNonIdempotentRules;  // Number of non idempotent rules
       logic [NrMaxRules-1:0][63:0]      NonIdempotentAddrBase; // base which needs to match
@@ -59,6 +60,7 @@ package ariane_pkg;
       RASDepth: 2,
       BTBEntries: 32,
       BHTEntries: 128,
+      GHRLength: 4,
       // idempotent region
       NrNonIdempotentRules: 2,
       NonIdempotentAddrBase: {64'b0, 64'b0},
@@ -286,6 +288,10 @@ package ariane_pkg;
     localparam int unsigned FETCH_WIDTH       = 32;
     // maximum instructions we can fetch on one request (we support compressed instructions)
     localparam int unsigned INSTR_PER_FETCH = FETCH_WIDTH / 16;
+    // tag bits in branch prediction table
+    localparam int unsigned TAG_BITS = 10;
+    // fetch target queue depth
+    localparam int unsigned FTQ_FIFO_DEPTH = 8;
 
     // Only use struct when signals have same direction
     // exception
@@ -693,6 +699,7 @@ package ariane_pkg;
         logic                     kill_s2;                // kill the last request
         logic                     spec;                   // request is speculative
         logic [riscv::VLEN-1:0]   vaddr;                  // 1st cycle: 12 bit index is taken for lookup
+        logic                     replay;                 // is this request a replay
     } icache_dreq_i_t;
 
     typedef struct packed {
@@ -701,6 +708,7 @@ package ariane_pkg;
         logic [FETCH_WIDTH-1:0]   data;                   // 2+ cycle out: tag
         logic [riscv::VLEN-1:0]   vaddr;                  // virtual address out
         exception_t               ex;                     // we've encountered an exception
+        logic                     replay;                 // is this request a replay
     } icache_dreq_o_t;
 
     // AMO request going to cache. this request is unconditionally valid as soon
