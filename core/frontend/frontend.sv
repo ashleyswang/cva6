@@ -388,9 +388,11 @@ module frontend import ariane_pkg::*; #(
 
     bht #(
       // .GHR_LENGTH       ( ArianeCfg.GHRLength    ),
-      .GHR_LENGTH       ( 4    ),
       // .NR_ENTRIES       ( ArianeCfg.BHTEntries   )
-      .NR_ENTRIES       ( 2048   )
+      .GHR_LENGTH       ( 62    ),
+      .NR_ENTRIES       ( 2048   ),
+      .THRESHOLD        ( 100000 ),
+      .TRAIN_THRESHOLD  ( 134 )
     ) i_bht (
       .clk_i,
       .rst_ni,

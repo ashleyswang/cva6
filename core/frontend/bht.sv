@@ -2,7 +2,8 @@
 module bht #(
     parameter int unsigned GHR_LENGTH = 10,
     parameter int unsigned NR_ENTRIES = 1024,
-    parameter int signed THRESHOLD = 3
+    parameter int signed THRESHOLD = 30,    // max weight
+    parameter int unsigned TRAIN_THRESHOLD = 30
 )(
     input  logic                        clk_i,
     input  logic                        rst_ni,
@@ -15,18 +16,19 @@ module bht #(
     output ariane_pkg::bht_prediction_t [ariane_pkg::INSTR_PER_FETCH-1:0] bht_prediction_o
 );
     // START OF DEBUG SETUP - perceptron weight tracking
-    int fd;
+    // int fd;
 
-    initial begin
-        fd = $fopen("./debug.txt", "w");
-        $fdisplay(fd, "This is a file tracking changes to the perceptrons");
-    end
+    // initial begin
+    //     fd = $fopen("./debug.txt", "w");
+    //     $fdisplay(fd, "This is a file tracking changes to the perceptrons");
+    // end
     // END OF DEBUG SETUP
 
     logic [$clog2(NR_ENTRIES)-1:0]  index_p, index_u;
-    logic [$clog2(ariane_pkg::INSTR_PER_FETCH-1)-1:0] rindex_u;
+    logic [$clog2(ariane_pkg::INSTR_PER_FETCH)-1:0] rindex_u;
 
     logic signed [31:0] outcome [ariane_pkg::INSTR_PER_FETCH-1:0];
+    logic signed [31:0] outcome_u;
     logic [GHR_LENGTH-1:0] ghr_d_spec, ghr_q_spec, ghr_d_comm, ghr_q_comm, upd_mask;
     logic signed [GHR_LENGTH-1:0][31:0] perceptron_block;
     logic signed [31:0] perceptron_bias;
@@ -48,8 +50,9 @@ module bht #(
 
     // assign prediction to output
     for (genvar i = 0; i < ariane_pkg::INSTR_PER_FETCH; i++) begin : gen_output
+        // assign bht_prediction_o[i].valid = is_branch_i[i];
         assign bht_prediction_o[i].valid = 1'b1;
-        assign bht_prediction_o[i].taken = (outcome[i] > 0);
+        assign bht_prediction_o[i].taken = (outcome[i] >= 0);
     end
 
     // update weights, calculate prediction 
@@ -68,19 +71,35 @@ module bht #(
             end
             ghr_d_comm[0] = bht_update_i.taken;
 
-            // update weights in perceptron
-            for (int unsigned i = 0; i < GHR_LENGTH; i++) begin
-                if (upd_mask[i])
-                    pbp_d[index_u][rindex_u].perceptron_weights[i] = (perceptron_block[i] >= THRESHOLD) ? THRESHOLD : perceptron_block[i] + 1;
+            // check if training is done
+            // bias
+            outcome_u = pbp_q[index_u][rindex_u].bias;
+            // update outcome according to weights and history
+            for (int unsigned j = 0; j < GHR_LENGTH; j++) begin
+                if (ghr_q_spec[j])
+                    outcome_u += pbp_q[index_u][rindex_u].perceptron_weights[j];
                 else
-                    pbp_d[index_u][rindex_u].perceptron_weights[i] = (perceptron_block[i] <= -THRESHOLD) ? -THRESHOLD : perceptron_block[i] - 1;
+                    outcome_u -= pbp_q[index_u][rindex_u].perceptron_weights[j];
             end
-            // update bias in perceptron
-            if (bht_update_i.taken)
-                pbp_d[index_u][rindex_u].bias = (perceptron_bias >= THRESHOLD) ? THRESHOLD : perceptron_bias + 1;
-            else
-                pbp_d[index_u][rindex_u].bias = (perceptron_bias <= -THRESHOLD) ? -THRESHOLD : perceptron_bias - 1;
+            outcome_u = outcome_u[31] ? -outcome_u : outcome_u;
+
+            if (outcome_u < TRAIN_THRESHOLD || bht_update_i.mispredict) begin
+
+                // update weights in perceptron
+                for (int unsigned i = 0; i < GHR_LENGTH; i++) begin
+                    if (upd_mask[i])
+                        pbp_d[index_u][rindex_u].perceptron_weights[i] = (perceptron_block[i] >= THRESHOLD) ? THRESHOLD : perceptron_block[i] + 1;
+                    else
+                        pbp_d[index_u][rindex_u].perceptron_weights[i] = (perceptron_block[i] <= -THRESHOLD) ? -THRESHOLD : perceptron_block[i] - 1;
+                end
+                // update bias in perceptron
+                if (bht_update_i.taken)
+                    pbp_d[index_u][rindex_u].bias = (perceptron_bias >= THRESHOLD) ? THRESHOLD : perceptron_bias + 1;
+                else
+                    pbp_d[index_u][rindex_u].bias = (perceptron_bias <= -THRESHOLD) ? -THRESHOLD : perceptron_bias - 1;
             
+            end
+
             // revert speculative global history if mispredict
             if (bht_update_i.mispredict)
                 ghr_d_spec = ghr_d_comm;
@@ -89,7 +108,7 @@ module bht #(
             ghr_d_spec = ghr_d_comm;
         end
 
-        // calculate outcome - predict taken if outcome > 0
+        // calculate outcome - predict taken if outcome > 0 
         for (int unsigned i = 0; i < ariane_pkg::INSTR_PER_FETCH; i++) begin
             // bias
             outcome[i] = pbp_q[index_p][i].bias;
@@ -101,11 +120,11 @@ module bht #(
                     outcome[i] -= pbp_q[index_p][i].perceptron_weights[j];
             end
             // shift prediction into speculative global history
-            if (is_branch_i[i]) begin
+            if (is_branch_i[i]) begin // (this includes jumps right now)
                 for (int unsigned j = 1; j < GHR_LENGTH; j++) begin
                     ghr_d_spec[j] = ghr_q_spec[j-1];
                 end
-                ghr_d_spec[0] = (outcome[i] > 0);
+                ghr_d_spec[0] = (outcome[i] >= 0);
             end
         end
     end
@@ -128,24 +147,24 @@ module bht #(
             ghr_q_spec <= ghr_d_spec;
         end
         // START OF DEBUG PRINT - print PCs, indices, histories, weights of accessed perceptrons with non-zero weights
-        if (pbp_q[index_p][0].bias) begin
-            $fdisplay(fd, "predict pc = %0h", vpc_i);
-            $fdisplay(fd, "predict index = %0h", index_p);
-            $fdisplay(fd, "spec hist = %0b", ghr_q_spec);
-            $fdisplay(fd, "weights: ");
-            for (int unsigned i = 0; i < GHR_LENGTH; i++) begin
-                $fdisplay(fd, "%0d", pbp_q[index_p][0].perceptron_weights[i]);
-            end
-        end
-        if (pbp_q[index_u][rindex_u].bias) begin
-            $fdisplay(fd, "update pc = %0h", bht_update_i.pc);
-            $fdisplay(fd, "update index = %0h", index_u);
-            $fdisplay(fd, "comm hist = %0b", ghr_q_comm);
-            $fdisplay(fd, "weights: ");
-            for (int unsigned i = 0; i < GHR_LENGTH; i++) begin
-                $fdisplay(fd, "%0d", pbp_q[index_u][rindex_u].perceptron_weights[i]);
-            end
-        end
+        // if (pbp_q[index_p][0].bias) begin
+        //     $fdisplay(fd, "predict pc = 0x  %0h", vpc_i);
+        //     $fdisplay(fd, "predict index = 0d  %0d", index_p);
+        //     $fdisplay(fd, "spec hist = 0b  %0b", ghr_q_spec);
+        //     $fdisplay(fd, "bias: 0d  %0d", pbp_q[index_p][0].bias);
+        //     for (int unsigned i = 0; i < GHR_LENGTH; i++) begin
+        //         $fdisplay(fd, "weight %0d: 0d  %0d", i, pbp_q[index_p][0].perceptron_weights[i]);
+        //     end
+        // end
+        // if (pbp_q[index_u][rindex_u].bias) begin
+        //     $fdisplay(fd, "update pc = 0h  %0h", bht_update_i.pc);
+        //     $fdisplay(fd, "update index = 0d  %0d", index_u);
+        //     $fdisplay(fd, "comm hist = 0b  %0b", ghr_q_comm);
+        //     $fdisplay(fd, "bias: 0d  %0d", pbp_q[index_u][rindex_u].bias);
+        //     for (int unsigned i = 0; i < GHR_LENGTH; i++) begin
+        //         $fdisplay(fd, "weight %0d: 0d  %0d", i, pbp_q[index_u][rindex_u].perceptron_weights[i]);
+        //     end
+        // end
         // END OF DEBUG PRINT
     end
 endmodule
