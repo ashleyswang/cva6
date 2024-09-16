@@ -261,6 +261,7 @@ module frontend import ariane_pkg::*; #(
                                 & (resolved_branch_i.cf_type == ariane_pkg::Branch);
     assign bht_update.pc    = resolved_branch_i.pc;
     assign bht_update.taken = resolved_branch_i.is_taken;
+    assign bht_update.mispredict = resolved_branch_i.valid & resolved_branch_i.is_mispredict;
     // only update mispredicted branches e.g. no returns from the RAS
     assign btb_update.valid = resolved_branch_i.valid
                                 & resolved_branch_i.is_mispredict
@@ -386,12 +387,18 @@ module frontend import ariane_pkg::*; #(
     );
 
     bht #(
-      .NR_ENTRIES       ( ArianeCfg.BHTEntries   )
+      // .GHR_LENGTH       ( ArianeCfg.GHRLength    ),
+      // .NR_ENTRIES       ( ArianeCfg.BHTEntries   )
+      .GHR_LENGTH       ( 62    ),
+      .NR_ENTRIES       ( 2048   ),
+      .THRESHOLD        ( 100000 ),
+      .TRAIN_THRESHOLD  ( 134 )
     ) i_bht (
       .clk_i,
       .rst_ni,
       .flush_i          ( flush_bp_i       ),
       .debug_mode_i,
+      .is_branch_i      ( is_branch        ),
       .vpc_i            ( icache_vaddr_q   ),
       .bht_update_i     ( bht_update       ),
       .bht_prediction_o ( bht_prediction   )
